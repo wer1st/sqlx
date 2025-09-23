@@ -115,6 +115,7 @@ impl PgListener {
     /// Starts listening for notifications on a channel.
     /// The channel name is quoted here to ensure case sensitivity.
     pub async fn listen(&mut self, channel: &str) -> Result<(), Error> {
+        tracing::debug!("atl: listen {channel}");
         self.connection()
             .await?
             .execute(AssertSqlSafe(format!(r#"LISTEN "{}""#, ident(channel))))
@@ -133,6 +134,8 @@ impl PgListener {
         let beg = self.channels.len();
         self.channels.extend(channels.into_iter().map(|s| s.into()));
 
+        tracing::debug!("atl: listen_all. all channels = {:?}", self.channels);
+
         let query = build_listen_all_query(&self.channels[beg..]);
         self.connection()
             .await?
@@ -147,6 +150,7 @@ impl PgListener {
     pub async fn unlisten(&mut self, channel: &str) -> Result<(), Error> {
         // use RAW connection and do NOT re-connect automatically, since this is not required for
         // UNLISTEN (we've disconnected anyways)
+        tracing::debug!("atl: unlisten {channel}");
         if let Some(connection) = self.connection.as_mut() {
             connection
                 .execute(AssertSqlSafe(format!(r#"UNLISTEN "{}""#, ident(channel))))
@@ -168,6 +172,8 @@ impl PgListener {
             connection.execute("UNLISTEN *").await?;
         }
 
+        tracing::debug!("atl: unlisten_all. all channels = {:?}", self.channels);
+
         self.channels.clear();
 
         Ok(())
@@ -175,13 +181,19 @@ impl PgListener {
 
     #[inline]
     async fn connect_if_needed(&mut self) -> Result<(), Error> {
+        tracing::debug!("atl: connect_if_needed");
         if self.connection.is_none() {
+            tracing::debug!("atl: connection is none");
             let mut connection = self.pool.acquire().await?;
             connection.inner.stream.notifications = self.buffer_tx.take();
+
+            tracing::debug!("atl: reconnect and listen channels = {:?}", self.channels);
 
             connection
                 .execute(AssertSqlSafe(build_listen_all_query(&self.channels)))
                 .await?;
+
+            tracing::debug!("atl: got new connection");
 
             self.connection = Some(connection);
         }
@@ -224,6 +236,7 @@ impl PgListener {
     /// # }).unwrap();
     /// ```
     pub async fn recv(&mut self) -> Result<PgNotification, Error> {
+        tracing::debug!("atl: recv");
         loop {
             if let Some(notification) = self.try_recv().await? {
                 return Ok(notification);
@@ -260,7 +273,9 @@ impl PgListener {
     pub async fn try_recv(&mut self) -> Result<Option<PgNotification>, Error> {
         // Flush the buffer first, if anything
         // This would only fill up if this listener is used as a connection
+        tracing::debug!("atl: try_recv");
         if let Some(notification) = self.next_buffered() {
+            tracing::debug!("atl: got buffered notification = {notification:?}");
             return Ok(Some(notification));
         }
 
@@ -273,8 +288,11 @@ impl PgListener {
             let res = if let Some(ref mut close_event) = close_event {
                 // cancels the wait and returns `Err(PoolClosed)` if the pool is closed
                 // before `next_message` returns, or if the pool was already closed
+                tracing::debug!("atl: ");
+                tracing::debug!("atl: close event");
                 close_event.do_until(next_message).await?
             } else {
+                tracing::debug!("atl: next message");
                 next_message.await
             };
 
@@ -293,13 +311,16 @@ impl PgListener {
                         io::ErrorKind::BrokenPipe
                     ) =>
                 {
+                    tracing::error!("atl: io error = {err}");
                     if let Some(mut conn) = self.connection.take() {
                         self.buffer_tx = conn.inner.stream.notifications.take();
                         // Close the connection in a background task, so we can continue.
+                        tracing::debug!("atl: close on drop");
                         conn.close_on_drop();
                     }
 
                     if self.eager_reconnect {
+                        tracing::debug!("atl: is eager reconnect");
                         self.connect_if_needed().await?;
                     }
 
@@ -309,18 +330,23 @@ impl PgListener {
 
                 // Forward other errors
                 Err(error) => {
+                    tracing::error!("atl: error = {error}");
                     return Err(error);
                 }
             };
 
+            tracing::debug!("atl: message = {message:?}");
+
             match message.format {
                 // We've received an async notification, return it.
                 BackendMessageFormat::NotificationResponse => {
+                    tracing::debug!("atl: notification");
                     return Ok(Some(PgNotification(message.decode()?)));
                 }
 
                 // Mark the connection as ready for another query
                 BackendMessageFormat::ReadyForQuery => {
+                    tracing::debug!("atl: ready for query");
                     self.connection().await?.inner.pending_ready_for_query_count -= 1;
                 }
 
@@ -360,7 +386,9 @@ impl PgListener {
 
 impl Drop for PgListener {
     fn drop(&mut self) {
+        tracing::debug!("atl: drop");
         if let Some(mut conn) = self.connection.take() {
+            tracing::debug!("atl: drop connection");
             let fut = async move {
                 let _ = conn.execute("UNLISTEN *").await;
 
