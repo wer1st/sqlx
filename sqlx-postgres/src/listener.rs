@@ -180,20 +180,20 @@ impl PgListener {
     }
 
     #[inline]
-    async fn connect_if_needed(&mut self) -> Result<(), Error> {
-        tracing::debug!("atl: connect_if_needed");
+    async fn connect_if_needed(&mut self, log_id: u64) -> Result<(), Error> {
+        tracing::debug!("atl: connect_if_needed; log_id = {log_id}");
         if self.connection.is_none() {
-            tracing::debug!("atl: connection is none");
+            tracing::debug!("atl: connection is none; log_id = {log_id}");
             let mut connection = self.pool.acquire().await?;
             connection.inner.stream.notifications = self.buffer_tx.take();
 
-            tracing::debug!("atl: reconnect and listen channels = {:?}", self.channels);
+            tracing::debug!("atl: reconnect and listen channels = {:?}; log_id = {log_id}", self.channels);
 
             connection
                 .execute(AssertSqlSafe(build_listen_all_query(&self.channels)))
                 .await?;
 
-            tracing::debug!("atl: got new connection");
+            tracing::debug!("atl: got new connection; log_id = {log_id}");
 
             self.connection = Some(connection);
         }
@@ -204,7 +204,7 @@ impl PgListener {
     #[inline]
     async fn connection(&mut self) -> Result<&mut PgConnection, Error> {
         // Ensure we have an active connection to work with.
-        self.connect_if_needed().await?;
+        self.connect_if_needed(0).await?;
 
         Ok(self.connection.as_mut().unwrap())
     }
@@ -235,10 +235,10 @@ impl PgListener {
     /// # Result::<(), sqlx::Error>::Ok(())
     /// # }).unwrap();
     /// ```
-    pub async fn recv(&mut self) -> Result<PgNotification, Error> {
-        tracing::debug!("atl: recv");
+    pub async fn recv(&mut self, log_id: u64) -> Result<PgNotification, Error> {
+        tracing::debug!("atl: recv; log_id = {log_id}");
         loop {
-            if let Some(notification) = self.try_recv().await? {
+            if let Some(notification) = self.try_recv(log_id).await? {
                 return Ok(notification);
             }
         }
@@ -270,12 +270,12 @@ impl PgListener {
     /// ```
     ///
     /// [`eager_reconnect`]: PgListener::eager_reconnect
-    pub async fn try_recv(&mut self) -> Result<Option<PgNotification>, Error> {
+    pub async fn try_recv(&mut self, log_id: u64) -> Result<Option<PgNotification>, Error> {
         // Flush the buffer first, if anything
         // This would only fill up if this listener is used as a connection
-        tracing::debug!("atl: try_recv");
+        tracing::debug!("atl: try_recv; log_id = {log_id}");
         if let Some(notification) = self.next_buffered() {
-            tracing::debug!("atl: got buffered notification = {notification:?}");
+            tracing::debug!("atl: got buffered notification = {notification:?}; log_id = {log_id}");
             return Ok(Some(notification));
         }
 
@@ -288,11 +288,10 @@ impl PgListener {
             let res = if let Some(ref mut close_event) = close_event {
                 // cancels the wait and returns `Err(PoolClosed)` if the pool is closed
                 // before `next_message` returns, or if the pool was already closed
-                tracing::debug!("atl: ");
-                tracing::debug!("atl: close event");
+                tracing::debug!("atl: close event; log_id = {log_id}");
                 close_event.do_until(next_message).await?
             } else {
-                tracing::debug!("atl: next message");
+                tracing::debug!("atl: next message; log_id = {log_id}");
                 next_message.await
             };
 
@@ -311,17 +310,17 @@ impl PgListener {
                         io::ErrorKind::BrokenPipe
                     ) =>
                 {
-                    tracing::error!("atl: io error = {err}");
+                    tracing::error!("atl: io error = {err}; log_id = {log_id}");
                     if let Some(mut conn) = self.connection.take() {
                         self.buffer_tx = conn.inner.stream.notifications.take();
                         // Close the connection in a background task, so we can continue.
-                        tracing::debug!("atl: close on drop");
+                        tracing::debug!("atl: close on drop; log_id = {log_id}");
                         conn.close_on_drop();
                     }
 
                     if self.eager_reconnect {
-                        tracing::debug!("atl: is eager reconnect");
-                        self.connect_if_needed().await?;
+                        tracing::debug!("atl: is eager reconnect; log_id = {log_id}");
+                        self.connect_if_needed(log_id).await?;
                     }
 
                     // lost connection
@@ -330,23 +329,23 @@ impl PgListener {
 
                 // Forward other errors
                 Err(error) => {
-                    tracing::error!("atl: error = {error}");
+                    tracing::error!("atl: error = {error}; log_id = {log_id}");
                     return Err(error);
                 }
             };
 
-            tracing::debug!("atl: message = {message:?}");
+            tracing::debug!("atl: message = {message:?}; log_id = {log_id}");
 
             match message.format {
                 // We've received an async notification, return it.
                 BackendMessageFormat::NotificationResponse => {
-                    tracing::debug!("atl: notification");
+                    tracing::debug!("atl: notification; log_id = {log_id}");
                     return Ok(Some(PgNotification(message.decode()?)));
                 }
 
                 // Mark the connection as ready for another query
                 BackendMessageFormat::ReadyForQuery => {
-                    tracing::debug!("atl: ready for query");
+                    tracing::debug!("atl: ready for query; log_id = {log_id}");
                     self.connection().await?.inner.pending_ready_for_query_count -= 1;
                 }
 
@@ -378,7 +377,7 @@ impl PgListener {
     pub fn into_stream(mut self) -> impl Stream<Item = Result<PgNotification, Error>> + Unpin {
         Box::pin(try_stream! {
             loop {
-                r#yield!(self.recv().await?);
+                r#yield!(self.recv(0).await?);
             }
         })
     }

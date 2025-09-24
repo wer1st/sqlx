@@ -1059,7 +1059,7 @@ async fn test_listener_cleanup() -> anyhow::Result<()> {
 
     // Checks for a notification on the test channel
     async fn try_recv(listener: &mut PgListener) -> anyhow::Result<bool> {
-        match timeout(Duration::from_millis(100), listener.recv()).await {
+        match timeout(Duration::from_millis(100), listener.recv(0)).await {
             Ok(res) => {
                 res?;
                 Ok(true)
@@ -1118,7 +1118,7 @@ async fn test_listener_try_recv_buffered() -> anyhow::Result<()> {
 
     // Checks for a notification on the test channel
     async fn try_recv(listener: &mut PgListener) -> anyhow::Result<bool> {
-        match timeout(Duration::from_millis(100), listener.recv()).await {
+        match timeout(Duration::from_millis(100), listener.recv(0)).await {
             Ok(res) => {
                 res?;
                 Ok(true)
@@ -1175,7 +1175,7 @@ async fn test_pg_listener_allows_pool_to_close() -> anyhow::Result<()> {
     let mut listener = PgListener::connect_with(&pool).await?;
 
     sqlx_core::rt::spawn(async move {
-        listener.recv().await.unwrap();
+        listener.recv(0).await.unwrap();
     });
 
     // would previously hang forever since `PgListener` had no way to know the pool wanted to close
@@ -1213,7 +1213,7 @@ async fn test_pg_listener_implements_acquire() -> anyhow::Result<()> {
     txn.commit().await?;
 
     // And now we can receive the notification we sent in the transaction
-    let notification = listener.recv().await?;
+    let notification = listener.recv(0).await?;
     assert_eq!(
         notification.channel(),
         "test_pg_listener_implements_acquire"
